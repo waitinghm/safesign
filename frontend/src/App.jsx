@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, FileText, Shield, AlertTriangle, ChevronDown, ChevronUp, Key, Info, CheckCircle } from 'lucide-react';
+import { Upload, FileText, Shield, AlertTriangle, ChevronDown, ChevronUp, Key, Info } from 'lucide-react';
 
 // ==================================================================================
 // [1] 설정 및 API 요청 함수 (Service Layer)
-// - 백엔드 통신 로직을 여기서 관리합니다.
 // ==================================================================================
 
 const API_BASE_URL = "http://localhost:8000"; // FastAPI 서버 주소
@@ -11,23 +10,23 @@ const API_BASE_URL = "http://localhost:8000"; // FastAPI 서버 주소
 const apiService = {
   /**
    * 1단계: PDF 업로드 및 텍스트 추출
-   * @param {File} file - 업로드할 PDF 파일
-   * @param {string} apiKey - Gemini API Key
    */
   uploadPDF: async (file, apiKey) => {
-    // FormData 생성 (파일 전송용)
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('api_key', apiKey); // 백엔드 설계에 맞춰 추가
+    formData.append('api_key', apiKey);
 
     try {
       const response = await fetch(`${API_BASE_URL}/upload`, {
         method: 'POST',
-        body: formData, // 헤더에 Content-Type을 설정하지 않습니다 (브라우저가 자동 설정)
+        body: formData,
       });
 
-      if (!response.ok) throw new Error('파일 업로드 실패');
-      return await response.json(); // { status, text, filename } 반환 기대
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.detail || '파일 업로드 실패');
+      }
+      return await response.json();
     } catch (error) {
       console.error("Upload Error:", error);
       throw error;
@@ -35,27 +34,52 @@ const apiService = {
   },
 
   /**
-   * 2단계: AI 분석 요청
-   * @param {string} text - 분석할 계약서 텍스트
-   * @param {string} apiKey - Gemini API Key
+   * 2단계: AI 분석 요청 (스트리밍)
    */
-  analyzeText: async (text, apiKey) => {
+  analyzeTextStream: async (text, apiKey, onProgress) => {
     try {
       const response = await fetch(`${API_BASE_URL}/analyze`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          text: text,
-          api_key: apiKey
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, api_key: apiKey }),
       });
 
-      if (!response.ok) throw new Error('분석 요청 실패');
-      return await response.json(); // { status, results: [...] } 반환 기대
+      if (!response.ok) {
+         const errData = await response.json();
+         throw new Error(errData.detail || '분석 요청 실패');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); 
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const data = JSON.parse(line);
+            
+            if (data.status === 'progress') {
+              onProgress(data.current, data.total, data.message);
+            } else if (data.status === 'complete') {
+              return data.results;
+            } else if (data.status === 'error') {
+              throw new Error(data.message);
+            }
+          } catch (e) {
+            console.error("Parsing Error:", e);
+          }
+        }
+      }
     } catch (error) {
-      console.error("Analysis Error:", error);
+      console.error("Stream Error:", error);
       throw error;
     }
   }
@@ -63,108 +87,91 @@ const apiService = {
 
 
 // ==================================================================================
-// [2] 더미 데이터 (백엔드 서버가 준비 안 됐을 때 테스트용)
-// ==================================================================================
-const MOCK_DATA = {
-  text: `제1조 (목적)\n본 계약은 갑과 을 사이의 거래에 관한 제반 사항을 규정함을 목적으로 한다.\n\n제3조 (계약의 해지)\n갑은 본 계약 기간 중 언제든지 을에게 별도의 통지 없이 본 계약을 해지할 수 있다. 을은 이에 대해 어떠한 이의도 제기할 수 없다.\n\n제7조 (손해배상)\n을의 귀책사유로 인해 갑에게 손해가 발생한 경우, 을은 갑이 청구하는 일체의 손해를 배상하여야 한다.`,
-  results: [
-    { id: 1, title: '제3조 (계약의 해지)', score: 0.9, reason: '불공정', description: '갑은 언제든지 통지 없이 해지 가능함.', fix: '30일 전 서면 통지 필요.' },
-    { id: 2, title: '제7조 (손해배상)', score: 0.6, reason: '모호함', description: '손해배상 범위가 너무 포괄적임.', fix: '통상적인 손해로 제한 필요.' }
-  ]
-};
-
-
-// ==================================================================================
-// [3] 메인 컴포넌트 (UI Layer)
+// [2] 메인 컴포넌트 (UI Layer)
 // ==================================================================================
 
 function App() {
-  // --- [핵심 상태 변수 (State Variables)] ---
-  // 요청하신 대로 변수를 상단에 모았습니다.
-  const [apiKey, setApiKey] = useState('');           // 사용자 API Key
-  const [pdfFile, setPdfFile] = useState(null);       // 업로드한 PDF 파일 객체
-  const [pdfText, setPdfText] = useState('');         // 추출된 텍스트 (수정 가능)
-  const [resultList, setResultList] = useState([]);   // 분석 결과 리스트
+  // --- 상태 변수 ---
+  const [apiKey, setApiKey] = useState('');           
+  const [pdfFile, setPdfFile] = useState(null);       
+  const [pdfText, setPdfText] = useState('');         
+  const [resultList, setResultList] = useState([]);   
 
-  // --- [UI 제어용 상태] ---
+  // UI 상태
   const [step, setStep] = useState('upload'); // 'upload' | 'review' | 'result'
   const [isLoading, setIsLoading] = useState(false);
   const [showToxicOnly, setShowToxicOnly] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
   
-  // 리사이징 관련 상태
+  // 리사이징 상태
   const [sidebarWidth, setSidebarWidth] = useState(500); 
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef(null);
 
+  // 진행률 상태 (current/total)
+  const [progressStatus, setProgressStatus] = useState({ current: 0, total: 0, message: '' });
 
-  // --- [이벤트 핸들러: 비즈니스 로직] ---
 
-  // 1. 파일 선택 및 업로드 처리
+  // --- 이벤트 핸들러 ---
+
+  // 1. 파일 선택
   const handleFileUpload = async (e) => {
-    // input type="file"에서 선택한 파일 가져오기 (드래그앤드롭 대신 클릭 방식 예시)
-    // 실제로는 드롭존이나 input 핸들러에서 호출됨
     const file = e.target.files ? e.target.files[0] : null;
     if (!file) return;
-    
     processUpload(file);
   };
 
-  // 1-1. 업로드 프로세스 (드래그앤드롭 or 클릭 공통)
+  // 1-1. 업로드 로직
   const processUpload = async (file) => {
     if (!apiKey.trim()) {
       alert('⚠️ Gemini API Key를 먼저 입력해주세요!');
       return;
     }
 
-    setPdfFile(file); // 파일 상태 저장
+    setPdfFile(file); 
     setIsLoading(true);
 
     try {
-      // [실제 통신] 주석 해제하여 사용
       console.log("파일 전송 중:", file.name);
       const data = await apiService.uploadPDF(file, apiKey);
       setPdfText(data.text);
       setStep('review');
-      setIsLoading(false);
-
-      // [테스트용 Mock] (서버 없이 테스트할 때 사용)
-      // setTimeout(() => {
-      //   setPdfText(MOCK_DATA.text);
-        
-      // }, 1000);
-
     } catch (error) {
-      alert('업로드 중 오류가 발생했습니다.');
+      alert(error.message);
+    } finally {
       setIsLoading(false);
     }
   };
 
-  // 2. 분석 요청 처리
+  // 2. 분석 요청
   const handleAnalyze = async () => {
     setIsLoading(true);
+    setProgressStatus({ current: 0, total: 0, message: '분석 준비 중...' });
 
     try {
-      // [실제 통신] 주석 해제하여 사용
-      // const data = await apiService.analyzeText(pdfText, apiKey);
-      // setResultList(data.results);
+      const results = await apiService.analyzeTextStream(
+        pdfText, 
+        apiKey, 
+        (current, total, msg) => {
+          setProgressStatus({ current, total, message: msg });
+        }
+      );
 
-      // [테스트용 Mock]
-      setTimeout(() => {
-        setResultList(MOCK_DATA.results);
-        setStep('result');
-        setIsLoading(false);
-      }, 2000);
-
+      setResultList(results);
+      setStep('result');
+      
     } catch (error) {
-      alert('분석 중 오류가 발생했습니다.');
+      alert('분석 중 오류가 발생했습니다: ' + error.message);
+    } finally {
       setIsLoading(false);
     }
   };
 
-  // 3. UI 인터랙션 (카드 클릭 -> 스크롤 이동)
+  // 3. 인터랙션 (카드 클릭 -> 스크롤)
   const toggleExpand = (item) => {
-    if (item.score <= 0.4) return;
+    // 독소 조항이 아니면(is_toxic false) 클릭 방지하고 싶다면 아래 주석 해제
+    // if (!item.is_toxic) return; 
+
     setExpandedId(expandedId === item.id ? null : item.id);
 
     const element = document.getElementById(`line-${item.id}`);
@@ -175,7 +182,7 @@ function App() {
     }
   };
 
-  // 4. 리사이징 로직
+  // 4. 리사이징
   useEffect(() => {
     const handleMouseMove = (e) => {
       if (!isResizing) return;
@@ -197,20 +204,19 @@ function App() {
     };
   }, [isResizing]);
 
-  // 필터링 결과
+  // 필터링
   const filteredResults = showToxicOnly 
-    ? resultList.filter(r => r.score > 0.4) 
+    ? resultList.filter(r => r.is_toxic) 
     : resultList;
-  const toxicCount = resultList.filter(r => r.score > 0.4).length;
+  
+  const toxicCount = resultList.filter(r => r.is_toxic).length;
 
 
-  // ==================================================================================
-  // [4] 렌더링 (View Layer)
-  // ==================================================================================
+  // --- 렌더링 ---
   return (
     <div className="flex h-screen bg-gray-50 font-sans overflow-hidden select-none">
       
-      {/* --- 사이드바 --- */}
+      {/* 1. 사이드바 */}
       <aside className="w-72 bg-slate-900 text-white flex flex-col p-6 shadow-xl z-10 flex-shrink-0">
         <div className="flex items-center gap-3 mb-10">
           <Shield className="w-8 h-8 text-blue-400" />
@@ -227,15 +233,48 @@ function App() {
             />
           </div>
         </div>
-        {/* ...가이드 내용 생략... */}
+        
+        {/* 가이드 복구 */}
+        <div className="mt-auto">
+          <div className="bg-slate-800/50 rounded-xl p-4 border border-slate-700">
+            <h3 className="flex items-center gap-2 text-sm font-semibold mb-3 text-slate-300">
+              <Info className="w-4 h-4" /> 사용 가이드
+            </h3>
+            <ul className="text-xs text-slate-400 space-y-2 list-disc pl-4">
+              <li>PDF 계약서를 업로드하세요.</li>
+              <li>자동으로 텍스트가 추출됩니다.</li>
+              <li>'분석 시작'을 누르면 AI가 독소 조항을 찾아냅니다.</li>
+            </ul>
+          </div>
+          <p className="text-center text-[10px] text-slate-600 mt-4">Powered by Google Gemini</p>
+        </div>
       </aside>
 
-      {/* --- 메인 영역 --- */}
+      {/* 2. 메인 영역 */}
       <main className="flex-1 flex flex-col p-8 overflow-hidden relative min-w-[400px]">
+        {/* 로딩 & 프로그레스 오버레이 */}
         {isLoading && (
-          <div className="absolute inset-0 bg-white/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center">
-            <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mb-4"></div>
-            <p className="text-slate-600 font-medium animate-pulse">처리 중입니다...</p>
+          <div className="absolute inset-0 bg-white/90 backdrop-blur-sm z-50 flex flex-col items-center justify-center p-8">
+            <div className="w-16 h-16 border-4 border-slate-100 border-t-blue-600 rounded-full animate-spin mb-6"></div>
+            
+            <h3 className="text-xl font-bold text-slate-800 mb-2">{progressStatus.message}</h3>
+            
+            {/* [수정됨] [ 5 / 20 ] 형태 표시 */}
+            {step !== 'upload' &&(<>
+            <div className="text-3xl font-mono font-bold text-blue-600 mb-4 tracking-widest">
+              [ <span className="text-slate-800">{progressStatus.current}</span> / {progressStatus.total || '-'} ]
+            </div>
+
+            <div className="w-full max-w-md h-3 bg-slate-200 rounded-full overflow-hidden relative">
+              <div 
+                className="h-full bg-blue-600 transition-all duration-300 ease-out relative"
+                style={{ width: `${progressStatus.total ? (progressStatus.current / progressStatus.total) * 100 : 0}%` }}
+              >
+                 <div className="absolute top-0 left-0 bottom-0 right-0 bg-gradient-to-r from-transparent via-white/30 to-transparent w-full -translate-x-full animate-shimmer"></div>
+              </div>
+            </div>
+            </>
+          )}
           </div>
         )}
 
@@ -246,18 +285,8 @@ function App() {
         <div className="flex-1 bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
           {step === 'upload' && (
             <div className="flex-1 flex flex-col items-center justify-center m-4">
-               {/* 파일 입력 (숨김 처리 후 라벨로 연결) */}
-               <input 
-                id="file-upload" 
-                type="file" 
-                accept=".pdf"
-                className="hidden"
-                onChange={handleFileUpload}
-              />
-              <label 
-                htmlFor="file-upload"
-                className="flex flex-col items-center justify-center w-full h-full border-2 border-dashed border-slate-300 rounded-xl hover:bg-blue-50 hover:border-blue-400 transition-all cursor-pointer group"
-              >
+               <input id="file-upload" type="file" accept=".pdf" className="hidden" onChange={handleFileUpload} />
+              <label htmlFor="file-upload" className="flex flex-col items-center justify-center w-full h-full border-2 border-dashed border-slate-300 rounded-xl hover:bg-blue-50 hover:border-blue-400 transition-all cursor-pointer group">
                 <div className="bg-blue-100 p-4 rounded-full mb-4 group-hover:scale-110 transition-transform">
                   <Upload className="w-8 h-8 text-blue-600" />
                 </div>
@@ -286,14 +315,25 @@ function App() {
                 <div className="flex-1 p-8 overflow-y-auto text-slate-700 leading-8 font-mono text-sm bg-white">
                   {pdfText.split('\n').map((line, index) => {
                     if (!line.trim()) return <br key={index} />;
-                    const matchedResult = resultList.find(r => line.includes(r.title.split(' (')[0]));
+                    
+                    // [수정됨] 하이라이트 매칭 로직 변경 (title -> clause)
+                    // 줄이 조항 텍스트의 앞부분(약 10~20자)을 포함하는지 확인
+                    const matchedResult = resultList.find(r => 
+                      line.trim().startsWith(r.clause.substring(0, 15).trim()) || 
+                      r.clause.includes(line.trim()) && line.trim().length > 10
+                    );
                     
                     let highlightClass = "";
                     let riskId = "";
                     if (matchedResult) {
                       riskId = `line-${matchedResult.id}`;
-                      if (matchedResult.score > 0.8) highlightClass = "bg-red-100/80 text-red-900 border-b-2 border-red-200";
-                      else if (matchedResult.score > 0.4) highlightClass = "bg-yellow-100/80 text-yellow-900 border-b-2 border-yellow-200";
+                      // 백엔드 키값 (is_toxic) 사용
+                      if (matchedResult.is_toxic) {
+                         // 점수가 있다면 점수별 색상, 없다면 기본 독소 색상
+                         const score = matchedResult.score || 0.9; 
+                         if (score > 0.8) highlightClass = "bg-red-100/80 text-red-900 border-b-2 border-red-200";
+                         else highlightClass = "bg-yellow-100/80 text-yellow-900 border-b-2 border-yellow-200";
+                      }
                     }
                     return <p key={index} id={riskId} className={`mb-2 px-1 rounded transition-colors ${highlightClass}`}>{line}</p>;
                   })}
@@ -312,11 +352,15 @@ function App() {
         </div>
       </main>
 
-      {/* --- 분석 결과 영역 --- */}
+      {/* 3. 분석 결과 사이드바 */}
       {step === 'result' && (
         <aside ref={sidebarRef} className="bg-white border-l border-slate-200 flex flex-col shadow-2xl flex-shrink-0 relative" style={{ width: sidebarWidth }}>
-          <div onMouseDown={() => setIsResizing(true)} className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors z-50" />
-          
+          {/* 리사이징 핸들 */}
+          <div onMouseDown={() => setIsResizing(true)} className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors z-50 flex items-center justify-center group">
+            <div className="h-8 w-1 bg-slate-300 rounded-full group-hover:bg-white transition-colors"></div>
+          </div>
+
+          {/* 헤더 복구 */}
           <div className="p-6 border-b border-slate-100">
             <h3 className="text-lg font-bold text-slate-800 mb-4">분석 리포트</h3>
             <div className="flex gap-2 mb-4">
@@ -329,30 +373,53 @@ function App() {
                 <div className="text-xs text-slate-400 font-medium">전체 조항</div>
               </div>
             </div>
-            {/* 필터 버튼 생략 (이전 코드와 동일) */}
-             <div className="bg-slate-100 p-1 rounded-lg flex text-sm font-medium">
-              <button onClick={() => setShowToxicOnly(false)} className={`flex-1 py-1.5 rounded-md ${!showToxicOnly ? 'bg-white shadow-sm' : 'text-slate-500'}`}>전체</button>
-              <button onClick={() => setShowToxicOnly(true)} className={`flex-1 py-1.5 rounded-md ${showToxicOnly ? 'bg-white text-red-600 shadow-sm' : 'text-slate-500'}`}>독소 조항</button>
+            
+            <div className="bg-slate-100 p-1 rounded-lg flex text-sm font-medium">
+              <button 
+                onClick={() => setShowToxicOnly(false)} 
+                className={`flex-1 py-1.5 rounded-md transition-all ${!showToxicOnly ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                전체 보기
+              </button>
+              <button 
+                onClick={() => setShowToxicOnly(true)} 
+                className={`flex-1 py-1.5 rounded-md transition-all flex items-center justify-center gap-1 ${showToxicOnly ? 'bg-white text-red-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                <AlertTriangle className="w-3 h-3" /> 독소 조항만
+              </button>
             </div>
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50">
             {filteredResults.map((item) => {
-              const isToxic = item.score > 0.4;
+              // 백엔드 키값 사용: item.clause, item.is_toxic, item.suggestion
+              const isToxic = item.is_toxic;
               const isExpanded = expandedId === item.id;
-              let cardClass = item.score > 0.8 ? "border-red-200 bg-red-50" : item.score > 0.4 ? "border-yellow-200 bg-yellow-50" : "border-green-200 bg-green-50/30";
               
+              let cardClass = isToxic ? "border-red-200 bg-red-50" : "border-green-200 bg-green-50/30";
+              let badgeClass = isToxic ? "bg-red-100 text-red-700 border-red-200" : "bg-green-100 text-green-700 border-green-200";
+              let statusText = isToxic ? "독소조항" : "안전";
+
               return (
-                <div key={item.id} onClick={() => toggleExpand(item)} className={`rounded-xl border p-4 relative cursor-pointer ${cardClass}`}>
+                <div key={item.id} onClick={() => toggleExpand(item)} className={`rounded-xl border p-4 relative cursor-pointer hover:shadow-md transition-all ${cardClass}`}>
                   <div className="flex justify-between items-start mb-2">
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded border bg-white/50">{item.score > 0.8 ? '고위험' : item.score > 0.4 ? '주의' : '안전'}</span>
-                    {isToxic && (isExpanded ? <ChevronUp className="w-4 h-4"/> : <ChevronDown className="w-4 h-4"/>)}
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${badgeClass}`}>{statusText}</span>
+                    {isToxic && (isExpanded ? <ChevronUp className="w-4 h-4 text-slate-400"/> : <ChevronDown className="w-4 h-4 text-slate-400"/>)}
                   </div>
-                  <h4 className="font-bold text-slate-800 text-sm mb-1">{item.title}</h4>
+                  
+                  {/* 조항 내용 (제목) */}
+                  <h4 className="font-bold text-slate-800 text-sm mb-1 line-clamp-2 leading-snug">{item.clause}</h4>
+                  
                   {isToxic && isExpanded && (
                     <div className="mt-3 space-y-3 border-t border-black/5 pt-3">
-                      <p className="text-xs text-slate-700 bg-white/50 p-2 rounded">⚠️ {item.description}</p>
-                      <p className="text-xs text-blue-800 bg-blue-50 p-2 rounded">💡 {item.fix}</p>
+                      <div>
+                        <p className="text-xs font-bold text-slate-500 mb-1">⚠️ 판단 근거</p>
+                        <p className="text-xs text-slate-700 bg-white/50 p-2 rounded leading-relaxed">{item.reason}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-blue-600 mb-1">💡 수정 제안</p>
+                        <p className="text-xs text-blue-800 bg-blue-50 p-2 rounded leading-relaxed">{item.suggestion}</p>
+                      </div>
                     </div>
                   )}
                 </div>
