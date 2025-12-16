@@ -5,8 +5,8 @@ import time
 from dotenv import load_dotenv
 
 # [Import] src 폴더 내의 모듈을 불러옵니다.
-from src.toxic_detector import ToxicClauseDetector
-from src.llm_service import LLM_gemini
+from toxic_detector import ToxicClauseDetector
+from llm_service import LLM_gemini
 
 # --- 1. 페이지 설정 ---
 st.set_page_config(
