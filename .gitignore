@@ -238,5 +238,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+#contracts
+contracts/
+
 # 6. 개인용 테스트 파일
 tests/apiTest
