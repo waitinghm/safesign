@@ -8,10 +8,11 @@ import json
 import asyncio
 import re
 from toxic_detector import ToxicClauseDetector
+from ollama_detctor import ToxicClauseDetectorOllama
 from fastapi.responses import StreamingResponse # 스트리밍 응답용
 
 app = FastAPI()
-
+model_name = "hf.co/LiquidAI/LFM2-8B-A1B-GGUF:Q4_K_M"
 # 통신을 허용할 포트 선택
 origins = [
     "http://127.0.0.1:5173","http://localhost:5173"
@@ -31,7 +32,7 @@ async def upload_pdf(file: UploadFile = File(...) ,api_key: str = Form(...)):
         raise HTTPException(status_code=400, detail="PDF 파일만 업로드 가능합니다.")
     pdf_bytes = await file.read()
     try:
-        extractor = LLM_gemini(gemini_api_key=api_key,model="gemini-2.0-flash-lite")
+        extractor = LLM_gemini(gemini_api_key=api_key,model="gemini-2.5-flash")
         extracted_text = extractor.pdf_to_text(pdf_bytes)
 
         # 4. 결과 반환 (JSON)
@@ -64,7 +65,8 @@ async def analyze_contract(request: AnalyzeRequest):
     async def event_stream():
         try:
             yield json.dumps({"status": "progress","message": "법령, 판례 DB 불러오는 중..."}) + "\n"
-            detector = ToxicClauseDetector(api_key=request.api_key)
+            # detector = ToxicClauseDetector(api_key=request.api_key)
+            detector = ToxicClauseDetectorOllama(model_name=model_name)
             chunks  = parse_text_to_chunks(request.text)
             yield json.dumps({"status": "progress","message": f"총 {len(chunks)}개의 조항을 분석 중..."}) + "\n"
             raw_results = detector.detect(chunks, max_concurrent=5)
