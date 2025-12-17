@@ -1,3 +1,6 @@
+# Copyright (c) 2025 SafeSign
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from starlette.middleware.cors import CORSMiddleware
 from llm_service import LLM_gemini

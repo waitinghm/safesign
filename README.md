@@ -40,7 +40,12 @@ Labor-Contract-Validator/
 │
 ├── .env                       # API KEY 관리 (Git 업로드 금지)
 ├── .gitignore                 # Git 무시 설정
+├── LICENSE                    # MIT License
 ├── main.py                    # Streamlit 실행 진입점 (Entry Point)
 ├── README.md                  # 프로젝트 설명서
 └── requirements.txt           # 의존성 라이브러리 목록
 ```
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
